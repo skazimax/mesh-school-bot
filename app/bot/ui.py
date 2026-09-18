@@ -4,7 +4,7 @@ import asyncio
 import logging
 
 from aiogram import Bot, Dispatcher, Router
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import (
     BotCommand,
     BufferedInputFile,
@@ -182,6 +182,11 @@ def dispatcher(
             }
         )
 
+    def dm_unavailable(exc: Exception) -> bool:
+        return isinstance(exc, TelegramForbiddenError) or (
+            isinstance(exc, TelegramBadRequest) and "chat not found" in exc.message.lower()
+        )
+
     async def dm_notice(
         message: Message, user: User | None, query: CallbackQuery | None = None
     ) -> None:
@@ -209,14 +214,20 @@ def dispatcher(
         target = private_message(message, user)
         try:
             await process(target, text, shared_member=True)
-        except TelegramForbiddenError:
-            await dm_notice(message, user, query)
         except Exception as exc:
+            if dm_unavailable(exc):
+                await dm_notice(message, user, query)
+                return
             logger.warning("bot.private_reply failed error=%s", type(exc).__name__)
             try:
                 await target.answer("Не удалось выполнить запрос. Попробуйте позже.")
-            except TelegramForbiddenError:
-                await dm_notice(message, user, query)
+            except Exception as send_exc:
+                if dm_unavailable(send_exc):
+                    await dm_notice(message, user, query)
+                else:
+                    logger.warning(
+                        "bot.private_error_reply failed error=%s", type(send_exc).__name__
+                    )
 
     @router.my_chat_member()
     async def membership(event: ChatMemberUpdated, bot: Bot) -> None:
@@ -422,7 +433,9 @@ def dispatcher(
                             "Выбрано: " + ", ".join(s.name for s in scope.selected),
                             reply_markup=KEYBOARD,
                         )
-                    except TelegramForbiddenError:
+                    except Exception as exc:
+                        if not dm_unavailable(exc):
+                            raise
                         await dm_notice(message, query.from_user, query)
             elif action == "do" and value in {
                 "tomorrow",

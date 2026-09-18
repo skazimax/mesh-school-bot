@@ -6,7 +6,7 @@ from zoneinfo import ZoneInfo
 
 import pytest
 from aiogram import Bot
-from aiogram.exceptions import TelegramForbiddenError
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.methods import SendMessage, SendPhoto
 from aiogram.types import CallbackQuery, Message, Update
 
@@ -140,8 +140,10 @@ async def test_group_commands_and_callbacks_send_to_actor_and_private_members_ca
         await db.close()
 
 
+@pytest.mark.parametrize("not_started", [False, True])
 async def test_not_started_or_blocked_dm_has_one_group_hint_and_no_group_report(
     tmp_path: Path,
+    not_started: bool,
 ) -> None:
     db = Database(tmp_path / "bot.db")
     await db.open()
@@ -164,6 +166,8 @@ async def test_not_started_or_blocked_dm_has_one_group_hint_and_no_group_report(
 
     async def transport(self, method, **kwargs):  # type: ignore[no-untyped-def]
         if method.chat_id == 10:
+            if not_started:
+                raise TelegramBadRequest(method=method, message="Bad Request: chat not found")
             raise TelegramForbiddenError(method=method, message="Forbidden")
         grouped.append(method)
         return True
