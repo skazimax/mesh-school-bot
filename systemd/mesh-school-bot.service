@@ -1,0 +1,29 @@
+[Unit]
+Description=Family MESH diary Telegram bot
+Wants=network-online.target
+After=network-online.target
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=simple
+User=meshbot
+Group=meshbot
+WorkingDirectory=/opt/mesh-school-bot
+EnvironmentFile=/opt/mesh-school-bot/.env
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart=/opt/mesh-school-bot/.venv/bin/python -m app.main
+Restart=on-failure
+RestartSec=30
+TimeoutStopSec=30
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/mesh-school-bot/data /opt/mesh-school-bot/.secrets
+MemoryMax=256M
+
+[Install]
+WantedBy=multi-user.target

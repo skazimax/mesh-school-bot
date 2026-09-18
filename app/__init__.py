@@ -1,0 +1,1 @@
+"""Family MESH bot application."""

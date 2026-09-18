@@ -1,0 +1,395 @@
+"""Per-child tables, MESH trimester means and weekly snapshot comparisons."""
+
+import html
+import textwrap
+from dataclasses import dataclass
+from datetime import date, datetime, time, timedelta
+from decimal import ROUND_HALF_UP, Decimal
+from typing import Any
+from zoneinfo import ZoneInfo
+
+from app.mesh.models import Student
+from app.repository.database import Database
+
+
+@dataclass(frozen=True)
+class AverageChange:
+    before: Decimal | None
+    after: Decimal | None
+    delta: Decimal | None
+    direction: str
+
+
+def average_change(before: Decimal | None, after: Decimal | None) -> AverageChange:
+    if before is None or after is None:
+        return AverageChange(before, after, None, "UNKNOWN")
+    delta = (after - before).quantize(Decimal("0.01"), rounding=ROUND_HALF_UP)
+    return AverageChange(
+        before, after, delta, "UP" if delta > 0 else "DOWN" if delta < 0 else "UNCHANGED"
+    )
+
+
+def change_text(change: AverageChange) -> str:
+    if change.after is None:
+        return "—"
+    mean = f"{change.after:.2f}".replace(".", ",")
+    if change.delta is None:
+        return mean + " —"
+    if change.delta == 0:
+        return mean + " →"
+    return (
+        mean
+        + " "
+        + ("↑" if change.delta > 0 else "↓")
+        + f"{abs(change.delta):.2f}".replace(".", ",")
+    )
+
+
+def day_start(day: date, timezone: ZoneInfo) -> str:
+    return datetime.combine(day, time.min, timezone).isoformat()
+
+
+def week_start(day: date) -> date:
+    return day - timedelta(days=day.weekday())
+
+
+def homework_dates(today: date, mode: str) -> tuple[date, date]:
+    if mode == "tomorrow":
+        tomorrow = today + timedelta(days=1)
+        return tomorrow, tomorrow
+    if mode == "remaining":
+        return today + timedelta(days=1), week_start(today) + timedelta(days=6)
+    if mode == "next":
+        start = week_start(today) + timedelta(days=7)
+        return start, start + timedelta(days=6)
+    raise ValueError("unknown homework range")
+
+
+def split_messages(text: str, limit: int = 3000) -> list[str]:
+    parts: list[str] = []
+    current: list[str] = []
+    units = 0
+    for line in text.splitlines(keepends=True):
+        line_units = len(line.encode("utf-16-le")) // 2
+        if current and units + line_units > limit:
+            parts.append("".join(current))
+            current, units = [], 0
+        for char in line:
+            size = len(char.encode("utf-16-le")) // 2
+            if units + size > limit:
+                parts.append("".join(current))
+                current, units = [], 0
+            current.append(char)
+            units += size
+    if current:
+        parts.append("".join(current))
+    return parts
+
+
+def telegram_parts(text: str) -> list[str]:
+    # Escape after splitting: each HTML message is independently valid.
+    return ["<pre>" + html.escape(part) + "</pre>" for part in split_messages(text)]
+
+
+def cells(values: tuple[str, ...], widths: tuple[int, ...]) -> list[str]:
+    columns = [
+        [
+            line
+            for paragraph in value.replace("\r", "").split("\n")
+            for line in (textwrap.wrap(paragraph, width=width) or [""])
+        ]
+        for value, width in zip(values, widths, strict=True)
+    ]
+    return [
+        " ".join(
+            (column[index] if index < len(column) else "").ljust(width)
+            for column, width in zip(columns, widths, strict=True)
+        ).rstrip()
+        for index in range(max(map(len, columns)))
+    ]
+
+
+class ReportService:
+    def __init__(self, db: Database, timezone: ZoneInfo) -> None:
+        self.db, self.timezone = db, timezone
+
+    async def students(self, student_ids: frozenset[str] | None) -> list[Student]:
+        return [s for s in await self.db.students() if student_ids is None or s.id in student_ids]
+
+    async def current_averages(self, student_id: str, until: str) -> list[dict[str, Any]]:
+        return await self.db.rows(
+            "SELECT s.* FROM subject_snapshots s WHERE student_id=? AND snapshot_at<=? "
+            "AND snapshot_at=(SELECT MAX(t.snapshot_at) FROM subject_snapshots t "
+            "WHERE t.student_id=s.student_id AND t.subject_id=s.subject_id AND t.snapshot_at<=?) "
+            "ORDER BY subject_name",
+            (student_id, until, until),
+        )
+
+    async def get_average_change(
+        self, student_id: str, subject_id: str, since: str, until: str
+    ) -> AverageChange:
+        rows = await self.db.rows(
+            "SELECT * FROM subject_snapshots WHERE student_id=? AND subject_id=? "
+            "AND snapshot_at<=? ORDER BY snapshot_at DESC LIMIT 1",
+            (student_id, subject_id, until),
+        )
+        if not rows or rows[0]["period_id"] == "unknown":
+            return average_change(None, None)
+        current = rows[0]
+        previous = await self.db.rows(
+            "SELECT average FROM subject_snapshots WHERE student_id=? AND subject_id=? "
+            "AND period_id=? AND snapshot_at<=? ORDER BY snapshot_at DESC LIMIT 1",
+            (student_id, subject_id, current["period_id"], since),
+        )
+        return average_change(
+            Decimal(previous[0]["average"])
+            if previous and previous[0]["average"] is not None
+            else None,
+            Decimal(current["average"]) if current["average"] is not None else None,
+        )
+
+    async def weekly_change(self, current: dict[str, Any], today: date) -> AverageChange:
+        if (
+            current["period_id"] == "unknown"
+            or current["period_end"]
+            and current["period_end"] < today.isoformat()
+            or current["period_start"]
+            and current["period_start"] > today.isoformat()
+        ):
+            return average_change(None, None)
+        previous = await self.db.rows(
+            "SELECT average FROM weekly_averages WHERE student_id=? AND subject_id=? "
+            "AND week_start=? AND period_id=?",
+            (
+                current["student_id"],
+                current["subject_id"],
+                (week_start(today) - timedelta(days=7)).isoformat(),
+                current["period_id"],
+            ),
+        )
+        return average_change(
+            Decimal(previous[0]["average"])
+            if previous and previous[0]["average"] is not None
+            else None,
+            Decimal(current["average"]) if current["average"] is not None else None,
+        )
+
+    async def capture_weekly(
+        self, today: date, until: str, student_ids: frozenset[str] | None = None
+    ) -> None:
+        values: list[tuple[Any, ...]] = []
+        for student in await self.students(student_ids):
+            for current in await self.current_averages(student.id, until):
+                values.append(
+                    (
+                        student.id,
+                        current["subject_id"],
+                        week_start(today).isoformat(),
+                        current["period_id"],
+                        current["average"],
+                        until,
+                    )
+                )
+        async with self.db.lock:
+            try:
+                await self.db.db.executemany(
+                    "INSERT INTO weekly_averages VALUES(?,?,?,?,?,?) "
+                    "ON CONFLICT(student_id,subject_id,week_start) DO UPDATE SET "
+                    "period_id=excluded.period_id,average=excluded.average,"
+                    "snapshot_at=excluded.snapshot_at "
+                    "WHERE excluded.snapshot_at>=weekly_averages.snapshot_at",
+                    values,
+                )
+                await self.db.db.commit()
+            except BaseException:
+                await self.db.db.rollback()
+                raise
+
+    async def homework(
+        self, day: date, *, stale: bool = False, student_ids: frozenset[str] | None = None
+    ) -> str:
+        return await self.homework_range(day, day, "ДЗ", stale=stale, student_ids=student_ids)
+
+    async def homework_range(
+        self,
+        start: date,
+        end: date,
+        title: str,
+        *,
+        stale: bool = False,
+        student_ids: frozenset[str] | None = None,
+    ) -> str:
+        if start > end:
+            return "На этой неделе будущих дней не осталось. Выберите «Следующая неделя»."
+        lines = []
+        if stale:
+            lines.append("⚠️ Сохранённые ДЗ: МЭШ недоступен.\n")
+        weekdays = (
+            "Понедельник",
+            "Вторник",
+            "Среда",
+            "Четверг",
+            "Пятница",
+            "Суббота",
+            "Воскресенье",
+        )
+        for student in await self.students(student_ids):
+            lines.extend(textwrap.wrap(f"👤 {student.name}", width=33))
+            lines.extend(textwrap.wrap(title, width=33))
+            lines.append("")
+            day = start
+            while day <= end:
+                lines.append(f"📅 {weekdays[day.weekday()]}, {day:%d.%m}")
+                rows = await self.db.rows(
+                    "SELECT * FROM homework WHERE student_id=? AND lesson_date=? "
+                    "ORDER BY subject_name,mesh_homework_id",
+                    (student.id, day.isoformat()),
+                )
+                if rows:
+                    lines.extend(cells(("Предмет", "Задание"), (12, 20)))
+                    lines.append("─" * 12 + " " + "─" * 20)
+                    for row in rows:
+                        lines.extend(
+                            cells(
+                                (row["subject_name"], row["text"] or "Текст не указан в МЭШ"),
+                                (12, 20),
+                            )
+                        )
+                else:
+                    lines.append(
+                        "В МЭШ заданий не найдено." if not stale else "В кэше заданий не найдено."
+                    )
+                lines.append("")
+                day += timedelta(days=1)
+        return "\n".join(lines).strip()
+
+    async def grade_table(
+        self,
+        student: Student,
+        marks: list[dict[str, Any]],
+        title: str,
+        today: date,
+        until: str,
+        *,
+        all_subjects: bool,
+    ) -> list[str]:
+        lines = textwrap.wrap(f"👤 {student.name}", width=33) + textwrap.wrap(title, width=33)
+        averages = {
+            row["subject_id"]: row for row in await self.current_averages(student.id, until)
+        }
+        periods = sorted(
+            {
+                (row["period_start"], row["period_end"])
+                for row in averages.values()
+                if row["period_start"] and row["period_end"]
+            }
+        )
+        for start, end in periods:
+            lines.append(
+                f"📊 Триместр {date.fromisoformat(start):%d.%m}–{date.fromisoformat(end):%d.%m}"
+            )
+        groups: dict[str, list[dict[str, Any]]] = {}
+        for mark in marks:
+            groups.setdefault(mark["subject_id"], []).append(mark)
+        ids = set(groups) | (set(averages) if all_subjects else set())
+        if not ids:
+            return lines + [
+                "Новых оценок нет." if not all_subjects else "Оценок и средних в МЭШ не найдено.",
+                "",
+            ]
+        lines.extend(cells(("Предмет", "Оценки", "Среднее"), (12, 8, 11)))
+        lines.append("─" * 12 + " " + "─" * 8 + " " + "─" * 11)
+        names = {
+            subject: averages[subject]["subject_name"]
+            if subject in averages
+            else groups[subject][0]["subject_name"]
+            for subject in ids
+        }
+        for subject in sorted(ids, key=lambda key: names[key]):
+            values = " ".join(mark["value"] for mark in groups.get(subject, [])) or "—"
+            change = (
+                await self.weekly_change(averages[subject], today)
+                if subject in averages
+                else average_change(None, None)
+            )
+            lines.extend(cells((names[subject], values, change_text(change)), (12, 8, 11)))
+        lines.append("")
+        return lines
+
+    async def daily(
+        self,
+        today: date,
+        until: str,
+        since: str | None = None,
+        student_ids: frozenset[str] | None = None,
+    ) -> tuple[str, int]:
+        start = since or day_start(today, self.timezone)
+        lines, total = [], 0
+        for student in await self.students(student_ids):
+            rows = await self.db.rows(
+                "SELECT * FROM marks WHERE student_id=? AND initial_import=0 "
+                "AND first_seen_at>=? AND first_seen_at<? ORDER BY subject_name,first_seen_at",
+                (student.id, start, until),
+            )
+            lines.extend(
+                await self.grade_table(
+                    student, rows, f"Новые оценки · {today:%d.%m}", today, until, all_subjects=False
+                )
+            )
+            total += len(rows)
+        return "\n".join(lines).strip(), total
+
+    async def period(
+        self,
+        start: date,
+        end: date,
+        title: str,
+        until: str,
+        student_ids: frozenset[str] | None = None,
+    ) -> str:
+        lines = []
+        for student in await self.students(student_ids):
+            rows = await self.db.rows(
+                "SELECT * FROM marks WHERE student_id=? AND lesson_date BETWEEN ? AND ? "
+                "ORDER BY subject_name,lesson_date,mesh_mark_id",
+                (student.id, start.isoformat(), end.isoformat()),
+            )
+            lines.extend(
+                await self.grade_table(
+                    student,
+                    rows,
+                    f"{title} {start:%d.%m}–{end:%d.%m.%Y}",
+                    end,
+                    until,
+                    all_subjects=True,
+                )
+            )
+        return "\n".join(lines).strip()
+
+
+class WeeklyReportService:
+    def __init__(self, reports: ReportService) -> None:
+        self.reports = reports
+
+    async def render(
+        self,
+        today: date,
+        until: str,
+        student_ids: frozenset[str] | None = None,
+        *,
+        capture: bool = True,
+    ) -> str:
+        result = await self.reports.period(week_start(today), today, "Неделя", until, student_ids)
+        if capture:
+            await self.reports.capture_weekly(today, until, student_ids)
+        return result
+
+
+class MonthlyReportService:
+    def __init__(self, reports: ReportService) -> None:
+        self.reports = reports
+
+    async def render(
+        self, today: date, until: str, student_ids: frozenset[str] | None = None
+    ) -> str:
+        return await self.reports.period(today.replace(day=1), today, "Месяц", until, student_ids)
