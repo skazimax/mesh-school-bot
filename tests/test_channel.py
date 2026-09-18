@@ -109,17 +109,20 @@ async def test_connect_channel_publication_buttons_membership_and_channel_comman
             membership.return_value = SimpleNamespace(status="member")
             await dp.feed_update(bot, click("choose:2"))
             scope = await selection.scope(-1001234)
-            assert scope and scope.student_ids == {"2"}
+            assert scope and scope.student_ids == {"1", "2"}
+            personal = await selection.scope(30, shared_member=True)
+            assert personal and personal.student_ids == {"2"}
             answer.reset_mock()
             await dp.feed_update(bot, click("do:tomorrow"))
             content = "".join(call.args[0] for call in answer.await_args_list)
             assert "Михаил" in content and "Анна" not in content and "19.09" in content
-            assert answer.await_args.kwargs["reply_markup"].inline_keyboard
+            assert answer.await_args.kwargs["reply_markup"].keyboard
             answer.reset_mock()
             post = channel.model_copy(update={"text": "/hw_next"})
             await dp.feed_update(bot, Update(update_id=3, channel_post=post))
             content = "".join(call.args[0] for call in answer.await_args_list)
-            assert "21.09" in content and "27.09" in content and "Михаил" in content
+            assert "21.09" in content and "27.09" in content
+            assert "Михаил" in content and "Анна" in content
             answer.reset_mock()
             unbound = post.model_copy(
                 update={"chat": post.chat.model_copy(update={"id": -1009999})}

@@ -107,6 +107,9 @@ async def test_fives_use_whole_current_trimester_and_reconcile_mesh(data) -> Non
     assert await reports.subject_fives(current, date(2026, 9, 18), until) == 1
     text = await WeeklyReportService(reports).render(date(2026, 9, 18), until)
     assert "Биология     5     4,33 —     1" in text
+    documents = await reports.grade_documents("weekly", date(2026, 9, 18), until)
+    biology = next(row for row in documents[0].rows if row.subject == "Биология")
+    assert biology.marks == "5" and biology.needed == "1" and biology.average == "4,33"
     assert max(map(len, text.splitlines())) <= 33
     current["average"] = "4.50"
     assert await reports.subject_fives(current, date(2026, 9, 18), until) is None
@@ -185,6 +188,13 @@ async def test_daily_report_uses_first_seen_and_excludes_bootstrap(data) -> None
     assert "4,62 ↑0,20" in text
     assert "Математика   4" not in text
     assert "Получено оценок" not in text
+    documents = await reports.grade_documents(
+        "daily", date(2026, 9, 18), "2026-09-18T19:00:00+03:00"
+    )
+    assert len(documents) == 1
+    assert documents[0].rows[0].marks == "5"
+    assert documents[0].rows[0].average == "4,62"
+    assert documents[0].rows[0].delta == "↑0,20"
 
 
 async def test_weekly_report_uses_mesh_trimester_mean_and_previous_week(data) -> None:  # type: ignore[no-untyped-def]

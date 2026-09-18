@@ -39,8 +39,13 @@ class SelectionService:
             raise ValueError("channel ID must be negative")
         await self.db.set_state("report_channel", str(chat), now.isoformat())
 
-    async def scope(self, chat: int) -> StudentSelection | None:
-        if chat not in self.allowed_chats and chat != await self.report_channel():
+    async def scope(self, chat: int, *, shared_member: bool = False) -> StudentSelection | None:
+        # UI verifies current common-chat membership before using this flag for a private chat.
+        if (
+            chat not in self.allowed_chats
+            and chat != await self.report_channel()
+            and not (shared_member and chat > 0)
+        ):
             return None
         students = await self.db.students()
         if not students:
@@ -49,8 +54,10 @@ class SelectionService:
         selected = [student for student in students if student.id == chosen]
         return StudentSelection(tuple(students), tuple(selected or students))
 
-    async def select(self, chat: int, student_id: str | None, now: datetime) -> bool:
-        scope = await self.scope(chat)
+    async def select(
+        self, chat: int, student_id: str | None, now: datetime, *, shared_member: bool = False
+    ) -> bool:
+        scope = await self.scope(chat, shared_member=shared_member)
         if not scope or student_id is not None and student_id not in {s.id for s in scope.students}:
             return False
         await self.db.set_state(f"selected_student:{chat}", student_id or "all", now.isoformat())

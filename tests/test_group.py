@@ -71,7 +71,7 @@ async def test_group_start_connects_and_commands_and_buttons_use_shared_chat(
                 bot, Update(update_id=3, message=message.model_copy(update={"text": "/tomorrow"}))
             )
             assert "19.09" in answer.await_args.args[0]
-            assert answer.await_args.kwargs["reply_markup"].inline_keyboard
+            assert answer.await_args.kwargs["reply_markup"].keyboard
             answer.reset_mock()
             await dp.feed_update(
                 bot,
@@ -87,7 +87,7 @@ async def test_group_start_connects_and_commands_and_buttons_use_shared_chat(
                 ),
             )
             assert "21.09" in answer.await_args.args[0] and "27.09" in answer.await_args.args[0]
-            assert answer.await_args.kwargs["reply_markup"].inline_keyboard
+            assert answer.await_args.kwargs["reply_markup"].keyboard
     finally:
         await bot.session.close()
         await db.close()

@@ -17,6 +17,7 @@ from app.mesh.normalized import MobileMeshClient
 from app.mesh.storage import AuthStore
 from app.mesh.transport import Transport
 from app.repository.database import Database
+from app.services.report_images import font_files
 from app.services.reports import ReportService
 from app.services.selection import SelectionService
 from app.services.sync import SyncService
@@ -27,6 +28,8 @@ logger = logging.getLogger(__name__)
 async def run() -> None:
     os.umask(0o077)
     settings = Settings.load()
+    if settings.report_format == "image":
+        font_files(settings.report_font_path)
     settings.database.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     with (settings.database.parent / "service.lock").open("w") as lock:
         fcntl.flock(lock, fcntl.LOCK_EX | fcntl.LOCK_NB)

@@ -12,6 +12,7 @@ from app.mesh.normalized import MobileMeshClient
 from app.mesh.storage import AuthStore
 from app.mesh.transport import Transport
 from app.repository.database import Database
+from app.services.report_images import render_image
 from app.services.reports import (
     MonthlyReportService,
     ReportService,
@@ -49,10 +50,22 @@ async def run(command: str) -> int:
             for mode in ("tomorrow", "remaining", "next"):
                 start, end = homework_dates(now.date(), mode)
                 homework[mode] = len(await reports.homework_range(start, end, mode))
+            images = []
+            if settings.report_format == "image":
+                for kind in ("daily", "weekly", "monthly"):
+                    for document in await reports.grade_documents(
+                        kind, now.date(), now.isoformat()
+                    ):
+                        image = await asyncio.to_thread(
+                            render_image, document, settings.report_font_path
+                        )
+                        images.append(len(image))
             print(
                 json.dumps(
                     {
                         "daily_new_marks": new_count,
+                        "report_format": settings.report_format,
+                        "image_bytes": images,
                         "report_lengths": {
                             "daily": len(daily),
                             "weekly": len(weekly),

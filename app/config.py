@@ -34,6 +34,8 @@ class Settings:
     report_chat_id: int | None = None
     five_threshold: Decimal = Decimal("4.50")
     five_weight: int = 1
+    report_format: str = "text"
+    report_font_path: Path | None = None
 
     @classmethod
     def load(cls) -> "Settings":
@@ -53,6 +55,9 @@ class Settings:
             raise MeshConfigError("TELEGRAM_REPORT_CHAT_ID должен быть отрицательным ID канала.")
         report_time = time.fromisoformat(os.getenv("DAILY_REPORT_TIME") or "19:00")
         timeout = float(os.getenv("MESH_HTTP_TIMEOUT") or "20")
+        report_format = (os.getenv("REPORT_FORMAT") or "text").strip().lower()
+        if report_format not in {"text", "image"}:
+            raise MeshConfigError("REPORT_FORMAT должен быть text или image.")
         try:
             five_threshold = Decimal(os.getenv("FINAL_FIVE_THRESHOLD") or "4.50")
             five_weight = int(os.getenv("FINAL_FIVE_WEIGHT") or "1")
@@ -90,6 +95,10 @@ class Settings:
             report_chat_id=report_chat_id,
             five_threshold=five_threshold,
             five_weight=five_weight,
+            report_format=report_format,
+            report_font_path=Path(os.environ["REPORT_FONT_PATH"])
+            if os.getenv("REPORT_FONT_PATH")
+            else None,
         )
 
 

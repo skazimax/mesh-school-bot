@@ -10,6 +10,7 @@ from zoneinfo import ZoneInfo
 
 from app.mesh.models import Student
 from app.repository.database import Database
+from app.services.report_images import GradeDocument, GradeRow
 
 
 @dataclass(frozen=True)
@@ -401,6 +402,94 @@ class ReportService:
         )
         lines.append("")
         return lines
+
+    async def grade_documents(
+        self,
+        kind: str,
+        today: date,
+        until: str,
+        student_ids: frozenset[str] | None = None,
+        *,
+        since: str | None = None,
+        stale: bool = False,
+    ) -> list[GradeDocument]:
+        """Structured view for images, independent of the retained text renderer."""
+        if kind not in {"daily", "weekly", "monthly"}:
+            raise ValueError("Unknown grade report kind")
+        start = week_start(today) if kind == "weekly" else today.replace(day=1)
+        title = (
+            f"Новые оценки · {today:%d.%m.%Y}"
+            if kind == "daily"
+            else f"{'Неделя' if kind == 'weekly' else 'Месяц'} {start:%d.%m}–{today:%d.%m.%Y}"
+        )
+        target = f"{self.five_threshold:.2f}".replace(".", ",")
+        documents = []
+        for student in await self.students(student_ids):
+            if kind == "daily":
+                marks = await self.db.rows(
+                    "SELECT * FROM marks WHERE student_id=? AND initial_import=0 "
+                    "AND first_seen_at>=? AND first_seen_at<? ORDER BY subject_name,first_seen_at",
+                    (student.id, since or day_start(today, self.timezone), until),
+                )
+            else:
+                marks = await self.db.rows(
+                    "SELECT * FROM marks WHERE student_id=? AND lesson_date BETWEEN ? AND ? "
+                    "ORDER BY subject_name,lesson_date,mesh_mark_id",
+                    (student.id, start.isoformat(), today.isoformat()),
+                )
+            averages = {
+                row["subject_id"]: row for row in await self.current_averages(student.id, until)
+            }
+            groups: dict[str, list[dict[str, Any]]] = {}
+            for mark in marks:
+                groups.setdefault(mark["subject_id"], []).append(mark)
+            ids = set(groups) | (set(averages) if kind != "daily" else set())
+            rows = []
+            for subject in ids:
+                current = averages.get(subject)
+                name = current["subject_name"] if current else groups[subject][0]["subject_name"]
+                change = (
+                    await self.weekly_change(current, today)
+                    if current
+                    else average_change(None, None)
+                )
+                needed = await self.subject_fives(current, today, until) if current else None
+                change_parts = change_text(change).split(" ", 1)
+                rows.append(
+                    GradeRow(
+                        subject=name,
+                        marks=" · ".join(mark["value"] for mark in groups.get(subject, [])) or "—",
+                        average=change_parts[0],
+                        delta=change_parts[1] if len(change_parts) > 1 else "—",
+                        direction=change.direction,
+                        needed=str(needed) if needed is not None else "—",
+                    )
+                )
+            periods = sorted(
+                {
+                    f"{date.fromisoformat(row['period_start']):%d.%m}–"
+                    f"{date.fromisoformat(row['period_end']):%d.%m}"
+                    for row in averages.values()
+                    if row["period_start"] and row["period_end"]
+                }
+            )
+            documents.append(
+                GradeDocument(
+                    student=student.name,
+                    title=title,
+                    periods=periods,
+                    rows=sorted(rows, key=lambda row: row.subject),
+                    marks_label={"daily": "Новые", "weekly": "За неделю", "monthly": "За месяц"}[
+                        kind
+                    ],
+                    legend=f"До 5 — пятёрки веса {self.five_weight} до среднего {target}",
+                    warning="Сохранённые данные: МЭШ недоступен" if stale else "",
+                    empty_text="Новых оценок нет."
+                    if kind == "daily"
+                    else "Оценок и средних в МЭШ не найдено.",
+                )
+            )
+        return documents
 
     async def daily(
         self,

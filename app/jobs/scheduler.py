@@ -7,10 +7,12 @@ import logging
 from datetime import datetime
 
 from aiogram import Bot
+from aiogram.types import BufferedInputFile
 
 from app.bot.ui import channel_controls
 from app.config import Settings
 from app.repository.database import Database
+from app.services.report_images import IMAGE_PREFIX, GradeDocument, render_image
 from app.services.reports import (
     MonthlyReportService,
     ReportService,
@@ -48,28 +50,53 @@ class Scheduler:
         return bool(rows and rows[0]["complete"])
 
     async def send(
-        self, key: str, chat: int, text: str, now: str, student_ids: frozenset[str] | None = None
+        self,
+        key: str,
+        chat: int,
+        text: str,
+        now: str,
+        student_ids: frozenset[str] | None = None,
+        documents: list[GradeDocument] | None = None,
     ) -> None:
         if self.bot is None:
             return
-        delivery = await self.db.prepare_delivery(key, split_messages(text), now)
+        frozen = (
+            [document.freeze() for document in documents]
+            if documents is not None
+            else split_messages(text)
+        )
+        delivery = await self.db.prepare_delivery(key, frozen, now)
         if delivery["complete"]:
             return
         parts = json.loads(delivery["content"])
         for index in range(delivery["next_part"], len(parts)):
+            image = None
+            if parts[index].startswith(IMAGE_PREFIX):
+                image = await asyncio.to_thread(
+                    render_image,
+                    GradeDocument.thaw(parts[index]),
+                    getattr(self.settings, "report_font_path", None),
+                )
+            part = "<pre>" + html.escape(parts[index]) + "</pre>"
+            markup = None
             if self.selection:
                 scope = await self.selection.scope(chat)
                 if not scope or student_ids is not None and not student_ids <= scope.student_ids:
                     raise PermissionError("report scope changed")
-            # Keep frozen content plain: old and new deliveries share the same safe rendering.
-            part = "<pre>" + html.escape(parts[index]) + "</pre>"
-            if self.selection:
                 if chat != await self.selection.report_channel():
                     raise PermissionError("report channel changed")
-                markup = channel_controls(scope) if scope else None
-                await self.bot.send_message(chat, part, parse_mode="HTML", reply_markup=markup)
+                markup = channel_controls(scope)
+                if image is not None:
+                    await self.bot.send_photo(
+                        chat, BufferedInputFile(image, filename="grades.png"), reply_markup=markup
+                    )
+                else:
+                    await self.bot.send_message(chat, part, parse_mode="HTML", reply_markup=markup)
             else:
-                await self.bot.send_message(chat, part, parse_mode="HTML")
+                if image is not None:
+                    await self.bot.send_photo(chat, BufferedInputFile(image, filename="grades.png"))
+                else:
+                    await self.bot.send_message(chat, part, parse_mode="HTML")
             await self.db.delivery_progress(key, index + 1, index + 1 == len(parts), now)
         logger.info("report.sent type=%s", key.split(":")[0])
 
@@ -123,7 +150,14 @@ class Scheduler:
                         "SELECT key FROM report_delivery WHERE key=?", (daily_key,)
                     )
                     if count or self.settings.send_empty_daily or frozen:
-                        await self.send(daily_key, chat, text, cutoff, ids)
+                        documents = (
+                            await self.reports.grade_documents(
+                                "daily", now.date(), cutoff, ids, since=since
+                            )
+                            if getattr(self.settings, "report_format", "text") == "image"
+                            else None
+                        )
+                        await self.send(daily_key, chat, text, cutoff, ids, documents)
                     else:
                         await self.db.prepare_delivery(daily_key, [], cutoff)
                         await self.db.delivery_progress(daily_key, 0, True, cutoff)
@@ -144,7 +178,17 @@ class Scheduler:
                     monthly = await MonthlyReportService(self.reports).render(
                         now.date(), cutoff, ids
                     )
-                    await self.send(weekly_key, chat, weekly + "\n\n" + monthly, cutoff, ids)
+                    documents = None
+                    if getattr(self.settings, "report_format", "text") == "image":
+                        documents = await self.reports.grade_documents(
+                            "weekly", now.date(), cutoff, ids
+                        )
+                        documents += await self.reports.grade_documents(
+                            "monthly", now.date(), cutoff, ids
+                        )
+                    await self.send(
+                        weekly_key, chat, weekly + "\n\n" + monthly, cutoff, ids, documents
+                    )
                     saved = (
                         await self.db.rows(
                             "SELECT created_at FROM report_delivery WHERE key=?", (weekly_key,)
