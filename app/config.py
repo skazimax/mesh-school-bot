@@ -4,6 +4,7 @@ import os
 import ssl
 from dataclasses import dataclass
 from datetime import time
+from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -31,6 +32,8 @@ class Settings:
     ca_bundle: str | None = None
     telegram_proxy: SecretStr | None = None
     report_chat_id: int | None = None
+    five_threshold: Decimal = Decimal("4.50")
+    five_weight: int = 1
 
     @classmethod
     def load(cls) -> "Settings":
@@ -50,6 +53,15 @@ class Settings:
             raise MeshConfigError("TELEGRAM_REPORT_CHAT_ID должен быть отрицательным ID канала.")
         report_time = time.fromisoformat(os.getenv("DAILY_REPORT_TIME") or "19:00")
         timeout = float(os.getenv("MESH_HTTP_TIMEOUT") or "20")
+        try:
+            five_threshold = Decimal(os.getenv("FINAL_FIVE_THRESHOLD") or "4.50")
+            five_weight = int(os.getenv("FINAL_FIVE_WEIGHT") or "1")
+        except (InvalidOperation, ValueError) as exc:
+            raise MeshConfigError(
+                "Некорректные FINAL_FIVE_THRESHOLD или FINAL_FIVE_WEIGHT."
+            ) from exc
+        if not five_threshold.is_finite() or not 1 <= five_threshold < 5 or five_weight <= 0:
+            raise MeshConfigError("Порог итоговой 5: от 1 до <5; вес новой оценки: >0.")
         if not 0 < timeout <= 120 or report_time.tzinfo or report_time.second:
             raise MeshConfigError("Некорректные timeout или DAILY_REPORT_TIME (HH:MM).")
         if not worker and (not token.get_secret_value() or not chats):
@@ -76,6 +88,8 @@ class Settings:
             if os.getenv("TELEGRAM_PROXY")
             else None,
             report_chat_id=report_chat_id,
+            five_threshold=five_threshold,
+            five_weight=five_weight,
         )
 
 

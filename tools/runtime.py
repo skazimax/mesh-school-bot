@@ -36,7 +36,9 @@ async def run(command: str) -> int:
                     print("Синхронизация не завершена; безопасный статус доступен через status.")
                     return 2
         elif command == "reports":
-            reports = ReportService(db, settings.timezone)
+            reports = ReportService(
+                db, settings.timezone, settings.five_threshold, settings.five_weight
+            )
             now = datetime.now(settings.timezone)
             daily, new_count = await reports.daily(now.date(), now.isoformat())
             weekly = await WeeklyReportService(reports).render(

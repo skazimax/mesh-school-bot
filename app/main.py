@@ -57,7 +57,9 @@ async def run() -> None:
                     Transport(http), AuthStore(settings.auth_file), settings.profile_id
                 )
                 sync = SyncService(mesh, db, settings.timezone)
-                reports = ReportService(db, settings.timezone)
+                reports = ReportService(
+                    db, settings.timezone, settings.five_threshold, settings.five_weight
+                )
                 await sync.run()
                 now = sync.now().isoformat()
                 await db.set_state("last_sync_attempt", now, now)

@@ -13,6 +13,7 @@ from app.services.reports import (
     WeeklyReportService,
     average_change,
     change_text,
+    fives_needed,
     homework_dates,
     split_messages,
     telegram_parts,
@@ -31,6 +32,92 @@ def test_average_changes(before: str, after: str, direction: str, text: str) -> 
     change = average_change(Decimal(before), Decimal(after))
     assert change.direction == direction
     assert text in change_text(change)
+
+
+@pytest.mark.parametrize(
+    "values,weights,mean,target,future_weight,expected",
+    [
+        ([4, 4], [1, 1], "4", "4.50", 1, 2),
+        ([3, 5], [2, 1], "3.67", "4.50", 1, 5),
+        ([3, 5], [2, 1], "3.67", "4.50", 2, 3),
+        ([4, 5], [1, 1], "4.50", "4.50", 1, 0),
+        ([5], [1], "5", "4.50", 1, 0),
+        ([4, 4], [1, 1], "4", "4.60", 1, 3),
+        ([4, 4], [1, 1], "4.25", "4.50", 1, None),
+        ([], [], "4.50", "4.50", 1, None),
+        ([4], [0], "4", "4.50", 1, None),
+    ],
+)
+def test_fives_needed(values, weights, mean, target, future_weight, expected) -> None:  # type: ignore[no-untyped-def]
+    marks = [
+        {"numeric_value": str(value), "weight": weight}
+        for value, weight in zip(values, weights, strict=True)
+    ]
+    assert fives_needed(marks, Decimal(mean), Decimal(target), future_weight) == expected
+
+
+async def test_fives_use_whole_current_trimester_and_reconcile_mesh(data) -> None:  # type: ignore[no-untyped-def]
+    db, reports, student = data
+    # Earlier-period grades and another student's grades cannot affect the estimate.
+    marks = [
+        Mark(
+            id="older",
+            student_id="1",
+            subject_id="8",
+            subject_name="Биология",
+            value="4",
+            numeric_value=Decimal(4),
+            weight=2,
+            lesson_date=date(2026, 9, 2),
+        ),
+        Mark(
+            id="recent",
+            student_id="1",
+            subject_id="8",
+            subject_name="Биология",
+            value="5",
+            numeric_value=Decimal(5),
+            lesson_date=date(2026, 9, 17),
+        ),
+        Mark(
+            id="previous-term",
+            student_id="1",
+            subject_id="8",
+            subject_name="Биология",
+            value="2",
+            numeric_value=Decimal(2),
+            weight=10,
+            lesson_date=date(2026, 8, 31),
+        ),
+    ]
+    average = SubjectAverage(
+        student_id="1",
+        subject_id="8",
+        subject_name="Биология",
+        period_id="term",
+        period_start=date(2026, 9, 1),
+        period_end=date(2026, 11, 30),
+        average=Decimal("4.33"),
+    )
+    until = "2026-09-18T19:00:00+03:00"
+    await db.save_marks(student, marks, [average], "2026-09-18T18:00:00+03:00", False)
+    current = next(
+        row for row in await reports.current_averages("1", until) if row["subject_id"] == "8"
+    )
+    assert await reports.subject_fives(current, date(2026, 9, 18), until) == 1
+    text = await WeeklyReportService(reports).render(date(2026, 9, 18), until)
+    assert "Биология     5     4,33 —     1" in text
+    assert max(map(len, text.splitlines())) <= 33
+    current["average"] = "4.50"
+    assert await reports.subject_fives(current, date(2026, 9, 18), until) is None
+    current["period_start"] = None
+    assert await reports.subject_fives(current, date(2026, 9, 18), until) is None
+
+
+@pytest.mark.parametrize("target,weight", [("5", 1), ("NaN", 1), ("4.50", 0)])
+def test_fives_reject_invalid_settings(target: str, weight: int) -> None:
+    with pytest.raises(ValueError):
+        fives_needed([], Decimal(4), Decimal(target), weight)
 
 
 @pytest.fixture
@@ -213,7 +300,7 @@ async def test_reports_isolate_children_and_include_subjects_without_new_marks(d
         frozenset({"1"}),
     )
     assert "Другой ребёнок" not in text
-    assert "Биология     —        4,75 —" in text
+    assert "Биология     —     4,75 —" in text
     homework = await reports.homework_range(
         date(2026, 9, 19),
         date(2026, 9, 20),

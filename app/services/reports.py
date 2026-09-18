@@ -4,7 +4,7 @@ import html
 import textwrap
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
-from decimal import ROUND_HALF_UP, Decimal
+from decimal import ROUND_CEILING, ROUND_HALF_UP, Decimal
 from typing import Any
 from zoneinfo import ZoneInfo
 
@@ -47,6 +47,36 @@ def change_text(change: AverageChange) -> str:
 
 def day_start(day: date, timezone: ZoneInfo) -> str:
     return datetime.combine(day, time.min, timezone).isoformat()
+
+
+def fives_needed(
+    marks: list[dict[str, Any]],
+    official_mean: Decimal | None,
+    threshold: Decimal = Decimal("4.50"),
+    new_weight: int = 1,
+) -> int | None:
+    """Estimate future weighted fives using complete, reconciled period marks."""
+    if not threshold.is_finite() or not 1 <= threshold < 5 or new_weight <= 0:
+        raise ValueError("Invalid target or future mark weight")
+    if official_mean is None or not official_mean.is_finite():
+        return None
+    score, weight = Decimal(0), 0
+    for mark in marks:
+        if mark["numeric_value"] is None:
+            continue
+        value = Decimal(mark["numeric_value"])
+        mark_weight = mark["weight"]
+        if not value.is_finite() or not 1 <= value <= 5 or mark_weight <= 0:
+            return None
+        score += value * mark_weight
+        weight += mark_weight
+    # MESH rounds the displayed mean; allow only a rounding-sized discrepancy.
+    if not weight or abs(score / weight - official_mean) > Decimal("0.01"):
+        return None
+    deficit = threshold * weight - score
+    return max(
+        0, int((deficit / ((5 - threshold) * new_weight)).to_integral_value(rounding=ROUND_CEILING))
+    )
 
 
 def week_start(day: date) -> date:
@@ -110,8 +140,41 @@ def cells(values: tuple[str, ...], widths: tuple[int, ...]) -> list[str]:
 
 
 class ReportService:
-    def __init__(self, db: Database, timezone: ZoneInfo) -> None:
+    def __init__(
+        self,
+        db: Database,
+        timezone: ZoneInfo,
+        five_threshold: Decimal = Decimal("4.50"),
+        five_weight: int = 1,
+    ) -> None:
         self.db, self.timezone = db, timezone
+        self.five_threshold, self.five_weight = five_threshold, five_weight
+
+    async def subject_fives(self, current: dict[str, Any], today: date, until: str) -> int | None:
+        if (
+            current["period_id"] == "unknown"
+            or not current["period_start"]
+            or not current["period_end"]
+            or not current["period_start"] <= today.isoformat() <= current["period_end"]
+        ):
+            return None
+        marks = await self.db.rows(
+            "SELECT numeric_value,weight FROM marks WHERE student_id=? AND subject_id=? "
+            "AND lesson_date>=? AND lesson_date<=? AND first_seen_at<=?",
+            (
+                current["student_id"],
+                current["subject_id"],
+                current["period_start"],
+                min(today.isoformat(), current["period_end"]),
+                until,
+            ),
+        )
+        return fives_needed(
+            marks,
+            Decimal(current["average"]) if current["average"] is not None else None,
+            self.five_threshold,
+            self.five_weight,
+        )
 
     async def students(self, student_ids: frozenset[str] | None) -> list[Student]:
         return [s for s in await self.db.students() if student_ids is None or s.id in student_ids]
@@ -297,8 +360,9 @@ class ReportService:
                 "Новых оценок нет." if not all_subjects else "Оценок и средних в МЭШ не найдено.",
                 "",
             ]
-        lines.extend(cells(("Предмет", "Оценки", "Среднее"), (12, 8, 11)))
-        lines.append("─" * 12 + " " + "─" * 8 + " " + "─" * 11)
+        widths = (12, 5, 10, 3)
+        lines.extend(cells(("Предмет", "Оценки", "Среднее", "До⑤"), widths))
+        lines.append(" ".join("─" * width for width in widths))
         names = {
             subject: averages[subject]["subject_name"]
             if subject in averages
@@ -312,7 +376,29 @@ class ReportService:
                 if subject in averages
                 else average_change(None, None)
             )
-            lines.extend(cells((names[subject], values, change_text(change)), (12, 8, 11)))
+            needed = (
+                await self.subject_fives(averages[subject], today, until)
+                if subject in averages
+                else None
+            )
+            lines.extend(
+                cells(
+                    (
+                        names[subject],
+                        values,
+                        change_text(change),
+                        str(needed) if needed is not None else "—",
+                    ),
+                    widths,
+                )
+            )
+        target = f"{self.five_threshold:.2f}".replace(".", ",")
+        lines.extend(
+            textwrap.wrap(
+                f"До⑤: пятёрки веса {self.five_weight} до {target}. Ориентир, не итоговая оценка.",
+                width=33,
+            )
+        )
         lines.append("")
         return lines
 
