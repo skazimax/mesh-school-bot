@@ -109,6 +109,7 @@ async def test_group_commands_and_callbacks_send_to_actor_and_private_members_ca
                 isinstance(item, SendPhoto if report_format == "image" else SendMessage)
                 for item in reports
             )
+            assert all(item.reply_markup and item.reply_markup.remove_keyboard for item in reports)
             sent.clear()
             await dp.feed_update(bot, click("choose:2"))
             own = await selection.scope(30, shared_member=True)

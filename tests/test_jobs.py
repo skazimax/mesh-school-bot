@@ -163,7 +163,7 @@ async def test_automatic_reports_only_go_to_connected_channel_and_use_its_select
         assert chat == -1001234
         assert "Анна" not in content and "Михаил" in content
         assert call.kwargs["parse_mode"] == "HTML"
-        assert call.kwargs["reply_markup"].inline_keyboard
+        assert "reply_markup" not in call.kwargs
     assert len(await db.rows("SELECT * FROM weekly_averages")) == 1
     await scheduler.report_jobs(now)
     assert bot.send_message.await_count == 2

@@ -9,7 +9,6 @@ from datetime import datetime
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
 
-from app.bot.ui import channel_controls
 from app.config import Settings
 from app.repository.database import Database
 from app.services.report_images import IMAGE_PREFIX, GradeDocument, render_image
@@ -78,20 +77,16 @@ class Scheduler:
                     getattr(self.settings, "report_font_path", None),
                 )
             part = "<pre>" + html.escape(parts[index]) + "</pre>"
-            markup = None
             if self.selection:
                 scope = await self.selection.scope(chat)
                 if not scope or student_ids is not None and not student_ids <= scope.student_ids:
                     raise PermissionError("report scope changed")
                 if chat != await self.selection.report_channel():
                     raise PermissionError("report channel changed")
-                markup = channel_controls(scope)
                 if image is not None:
-                    await self.bot.send_photo(
-                        chat, BufferedInputFile(image, filename="grades.png"), reply_markup=markup
-                    )
+                    await self.bot.send_photo(chat, BufferedInputFile(image, filename="grades.png"))
                 else:
-                    await self.bot.send_message(chat, part, parse_mode="HTML", reply_markup=markup)
+                    await self.bot.send_message(chat, part, parse_mode="HTML")
             else:
                 if image is not None:
                     await self.bot.send_photo(chat, BufferedInputFile(image, filename="grades.png"))

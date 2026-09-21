@@ -116,7 +116,7 @@ async def test_connect_channel_publication_buttons_membership_and_channel_comman
             await dp.feed_update(bot, click("do:tomorrow"))
             content = "".join(call.args[0] for call in answer.await_args_list)
             assert "Михаил" in content and "Анна" not in content and "19.09" in content
-            assert answer.await_args.kwargs["reply_markup"].keyboard
+            assert answer.await_args.kwargs["reply_markup"].remove_keyboard
             answer.reset_mock()
             post = channel.model_copy(update={"text": "/hw_next"})
             await dp.feed_update(bot, Update(update_id=3, channel_post=post))

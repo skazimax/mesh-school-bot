@@ -13,10 +13,9 @@ from aiogram.types import (
     ChatMemberUpdated,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     Message,
     MessageOriginChannel,
-    ReplyKeyboardMarkup,
+    ReplyKeyboardRemove,
     User,
 )
 
@@ -48,15 +47,7 @@ BOT_COMMANDS = [
         ("status", "Состояние бота"),
     )
 ]
-KEYBOARD = ReplyKeyboardMarkup(
-    keyboard=[
-        [KeyboardButton(text="📚 Завтра"), KeyboardButton(text="📚 До конца недели")],
-        [KeyboardButton(text="📚 Следующая неделя")],
-        [KeyboardButton(text="📊 Оценки за неделю"), KeyboardButton(text="📈 Оценки за месяц")],
-        [KeyboardButton(text="👤 Выбрать ребёнка")],
-    ],
-    resize_keyboard=True,
-)
+HIDE_KEYBOARD = ReplyKeyboardRemove(remove_keyboard=True)
 
 
 def authorized(message: Message, allowed: frozenset[int]) -> bool:
@@ -342,7 +333,7 @@ def dispatcher(
                         return
                     await message.answer_photo(
                         BufferedInputFile(image, filename=f"grades-{kind}.png"),
-                        reply_markup=channel_controls(current) if in_channel else KEYBOARD,
+                        reply_markup=HIDE_KEYBOARD if not in_channel else None,
                     )
                 return
             answer = "⚠️ Сохранённые данные: МЭШ недоступен.\n\n" if not updated else ""
@@ -382,7 +373,7 @@ def dispatcher(
             await message.answer(
                 part,
                 parse_mode="HTML",
-                reply_markup=channel_controls(current) if in_channel else KEYBOARD,
+                reply_markup=HIDE_KEYBOARD if not in_channel else None,
             )
 
     @router.callback_query()
@@ -425,13 +416,12 @@ def dispatcher(
                 scope = await selection.scope(target.chat.id, shared_member=True)
                 await query.answer("Выбор сохранён для ваших личных запросов.")
                 if scope:
-                    markup = child_buttons(scope)
-                    if not in_channel and message.reply_markup != markup:
-                        await message.edit_reply_markup(reply_markup=markup)
+                    if not in_channel and message.reply_markup:
+                        await message.edit_reply_markup(reply_markup=None)
                     try:
                         await target.answer(
                             "Выбрано: " + ", ".join(s.name for s in scope.selected),
-                            reply_markup=KEYBOARD,
+                            reply_markup=HIDE_KEYBOARD,
                         )
                     except Exception as exc:
                         if not dm_unavailable(exc):

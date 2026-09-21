@@ -150,6 +150,7 @@ async def test_friday_automatic_images_keep_channel_destination_and_delivery_pro
         await scheduler.report_jobs(now)
         assert bot.send_photo.await_count == 3
         assert all(call.args[0] == -1001234 for call in bot.send_photo.await_args_list)
+        assert all("reply_markup" not in call.kwargs for call in bot.send_photo.await_args_list)
         bot.send_message.assert_not_awaited()
         deliveries = await db.rows("SELECT * FROM report_delivery ORDER BY key")
         assert len(deliveries) == 2 and all(row["complete"] for row in deliveries)
