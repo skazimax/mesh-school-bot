@@ -7,7 +7,7 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from app.bot.ui import authorized
-from app.jobs.scheduler import Scheduler
+from app.jobs.scheduler import Scheduler, report_kind
 from app.mesh.models import Mark, Student, SubjectAverage
 from app.repository.database import Database
 from app.services.reports import ReportService
@@ -52,7 +52,21 @@ async def test_partial_delivery_resumes_without_resending_sent_parts(tmp_path: P
     await db.close()
 
 
-async def test_friday_reports_daily_then_weekly_with_month_and_no_duplicates(
+@pytest.mark.parametrize(
+    "day,expected",
+    [
+        (date(2026, 9, 24), "daily"),
+        (date(2026, 9, 25), "weekly"),
+        (date(2026, 9, 30), "monthly"),
+        (date(2026, 10, 30), "monthly"),  # The 31st is Saturday: monthly replaces weekly.
+        (date(2026, 11, 30), "monthly"),
+    ],
+)
+def test_exactly_one_automatic_report_kind(day: date, expected: str) -> None:
+    assert report_kind(day) == expected
+
+
+async def test_friday_sends_only_weekly_and_no_duplicates(
     tmp_path: Path,
 ) -> None:
     db = Database(tmp_path / "bot.db")
@@ -62,7 +76,6 @@ async def test_friday_reports_daily_then_weekly_with_month_and_no_duplicates(
         allowed_chats=frozenset({10}),
         report_time=time(19),
         timezone=now.tzinfo,
-        send_empty_daily=False,
     )
     sync = SimpleNamespace(run=AsyncMock(return_value=True), now=lambda: now)
     reports = SimpleNamespace(
@@ -73,17 +86,39 @@ async def test_friday_reports_daily_then_weekly_with_month_and_no_duplicates(
     bot = SimpleNamespace(send_message=AsyncMock())
     scheduler = Scheduler(settings, sync, reports, db, bot)  # type: ignore[arg-type]
     await scheduler.report_jobs(now)
-    assert bot.send_message.await_count == 2
-    assert bot.send_message.await_args_list[0].args == (10, "<pre>daily</pre>")
-    assert bot.send_message.await_args_list[1].args == (
-        10,
-        "<pre>period report\n\nperiod report</pre>",
-    )
-    assert reports.period.await_count == 2
-    assert await db.state("daily_cutoff:10") == now.isoformat()
+    bot.send_message.assert_awaited_once_with(10, "<pre>period report</pre>", parse_mode="HTML")
+    reports.daily.assert_not_awaited()
+    reports.period.assert_awaited_once()
+    assert await db.state("daily_cutoff:10") is None
     await scheduler.report_jobs(now)
-    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_count == 1
     sync.run.assert_awaited_once()
+    await db.close()
+
+
+async def test_last_weekday_sends_only_monthly(tmp_path: Path) -> None:
+    db = Database(tmp_path / "bot.db")
+    await db.open()
+    now = datetime(2026, 9, 30, 19, 0, tzinfo=ZoneInfo("Europe/Moscow"))
+    settings = SimpleNamespace(
+        allowed_chats=frozenset({10}),
+        report_time=time(19),
+        timezone=now.tzinfo,
+    )
+    sync = SimpleNamespace(run=AsyncMock(return_value=True), now=lambda: now)
+    reports = SimpleNamespace(
+        daily=AsyncMock(return_value=("daily", 1)),
+        period=AsyncMock(return_value="monthly report"),
+        capture_weekly=AsyncMock(),
+    )
+    bot = SimpleNamespace(send_message=AsyncMock())
+    scheduler = Scheduler(settings, sync, reports, db, bot)  # type: ignore[arg-type]
+    await scheduler.report_jobs(now)
+    bot.send_message.assert_awaited_once_with(10, "<pre>monthly report</pre>", parse_mode="HTML")
+    reports.daily.assert_not_awaited()
+    assert reports.period.await_args.args[:3] == (date(2026, 9, 1), date(2026, 9, 30), "Месяц")
+    reports.capture_weekly.assert_awaited_once()
+    assert await scheduler.completed("monthly:2026-09-30:10")
     await db.close()
 
 
@@ -145,7 +180,6 @@ async def test_automatic_reports_only_go_to_connected_channel_and_use_its_select
         allowed_chats=frozenset({10, 20}),
         report_time=time(19),
         timezone=now.tzinfo,
-        send_empty_daily=False,
     )
     sync = SimpleNamespace(run=AsyncMock(return_value=True), now=lambda: now)
     bot = SimpleNamespace(send_message=AsyncMock())
@@ -157,7 +191,7 @@ async def test_automatic_reports_only_go_to_connected_channel_and_use_its_select
     await selection.bind_channel(-1001234, now)
     await selection.select(-1001234, "2", now)
     await scheduler.report_jobs(now)
-    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_count == 1
     for call in bot.send_message.await_args_list:
         chat, content = call.args
         assert chat == -1001234
@@ -166,5 +200,5 @@ async def test_automatic_reports_only_go_to_connected_channel_and_use_its_select
         assert "reply_markup" not in call.kwargs
     assert len(await db.rows("SELECT * FROM weekly_averages")) == 1
     await scheduler.report_jobs(now)
-    assert bot.send_message.await_count == 2
+    assert bot.send_message.await_count == 1
     await db.close()

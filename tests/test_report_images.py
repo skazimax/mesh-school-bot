@@ -140,7 +140,6 @@ async def test_friday_automatic_images_keep_channel_destination_and_delivery_pro
         allowed_chats=frozenset({10}),
         report_time=time(19),
         timezone=now.tzinfo,
-        send_empty_daily=False,
         report_format="image",
     )
     sync = SimpleNamespace(run=AsyncMock(return_value=True), now=lambda: now)
@@ -148,16 +147,16 @@ async def test_friday_automatic_images_keep_channel_destination_and_delivery_pro
     scheduler = Scheduler(settings, sync, ReportService(db, now.tzinfo), db, bot, selection)  # type: ignore[arg-type]
     try:
         await scheduler.report_jobs(now)
-        assert bot.send_photo.await_count == 3
+        assert bot.send_photo.await_count == 1
         assert all(call.args[0] == -1001234 for call in bot.send_photo.await_args_list)
         assert all("reply_markup" not in call.kwargs for call in bot.send_photo.await_args_list)
         bot.send_message.assert_not_awaited()
         deliveries = await db.rows("SELECT * FROM report_delivery ORDER BY key")
-        assert len(deliveries) == 2 and all(row["complete"] for row in deliveries)
-        assert len(json.loads(deliveries[1]["content"])) == 2
-        assert await db.state("daily_cutoff:-1001234") == now.isoformat()
+        assert len(deliveries) == 1 and deliveries[0]["complete"]
+        assert len(json.loads(deliveries[0]["content"])) == 1
+        assert await db.state("daily_cutoff:-1001234") is None
         assert len(await db.rows("SELECT * FROM weekly_averages")) == 1
         await scheduler.report_jobs(now)
-        assert bot.send_photo.await_count == 3
+        assert bot.send_photo.await_count == 1
     finally:
         await db.close()

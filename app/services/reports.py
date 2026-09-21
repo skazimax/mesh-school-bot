@@ -431,6 +431,8 @@ class ReportService:
                     "AND first_seen_at>=? AND first_seen_at<? ORDER BY subject_name,first_seen_at",
                     (student.id, since or day_start(today, self.timezone), until),
                 )
+                if not marks:
+                    continue
             else:
                 marks = await self.db.rows(
                     "SELECT * FROM marks WHERE student_id=? AND lesson_date BETWEEN ? AND ? "
@@ -506,6 +508,8 @@ class ReportService:
                 "AND first_seen_at>=? AND first_seen_at<? ORDER BY subject_name,first_seen_at",
                 (student.id, start, until),
             )
+            if not rows:
+                continue
             lines.extend(
                 await self.grade_table(
                     student, rows, f"Новые оценки · {today:%d.%m}", today, until, all_subjects=False

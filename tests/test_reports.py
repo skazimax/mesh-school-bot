@@ -195,6 +195,14 @@ async def test_daily_report_uses_first_seen_and_excludes_bootstrap(data) -> None
     assert documents[0].rows[0].marks == "5"
     assert documents[0].rows[0].average == "4,62"
     assert documents[0].rows[0].delta == "↑0,20"
+    other = Student(id="2", profile_id="2", name="Другой ребёнок")
+    await db.save_students([student, other])
+    text, count = await reports.daily(date(2026, 9, 18), "2026-09-18T19:00:00+03:00")
+    documents = await reports.grade_documents(
+        "daily", date(2026, 9, 18), "2026-09-18T19:00:00+03:00"
+    )
+    assert count == 1 and "Другой ребёнок" not in text
+    assert [document.student for document in documents] == ["Ребёнок"]
 
 
 async def test_weekly_report_uses_mesh_trimester_mean_and_previous_week(data) -> None:  # type: ignore[no-untyped-def]

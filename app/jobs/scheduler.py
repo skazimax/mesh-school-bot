@@ -4,7 +4,7 @@ import asyncio
 import html
 import json
 import logging
-from datetime import datetime
+from datetime import date, datetime, timedelta
 
 from aiogram import Bot
 from aiogram.types import BufferedInputFile
@@ -29,6 +29,16 @@ def elapsed(previous: str | None, now: datetime, seconds: int) -> bool:
     if not previous:
         return True
     return (now - datetime.fromisoformat(previous)).total_seconds() >= seconds
+
+
+def report_kind(day: date) -> str:
+    """Choose exactly one automatic report for a school weekday."""
+    next_day = day + timedelta(days=1)
+    while next_day.weekday() >= 5:
+        next_day += timedelta(days=1)
+    if next_day.month != day.month:
+        return "monthly"
+    return "weekly" if day.weekday() == 4 else "daily"
 
 
 class Scheduler:
@@ -116,16 +126,11 @@ class Scheduler:
             scope = await self.selection.scope(chat) if self.selection else None
             if self.selection and not scope:
                 continue
-            # Preserve existing all-family administrator deliveries and cutoffs.
+            # Preserve the selected child scope in durable delivery keys.
             suffix = "" if not scope or scope.selected == scope.students else ":" + scope.key
             ids = scope.student_ids if scope else None
-            daily_key = f"daily:{day}:{chat}{suffix}"
-            weekly_key = f"weekly:{day}:{chat}{suffix}"
-            if (
-                not await self.completed(daily_key)
-                or now.weekday() == 4
-                and not await self.completed(weekly_key)
-            ):
+            kind = report_kind(now.date())
+            if not await self.completed(f"{kind}:{day}:{chat}{suffix}"):
                 pending.append((chat, suffix, ids))
         if not pending or not elapsed(await self.db.state("report_attempt:" + day), now, 900):
             return
@@ -135,16 +140,15 @@ class Scheduler:
         cutoff = self.sync.now().isoformat()
         for chat, suffix, ids in pending:
             try:
-                daily_key = f"daily:{day}:{chat}{suffix}"
-                if not await self.completed(daily_key):
-                    since = await self.db.state(f"daily_cutoff:{chat}{suffix}") or day_start(
-                        now.date(), self.settings.timezone
-                    )
+                kind = report_kind(now.date())
+                if kind == "daily":
+                    daily_key = f"daily:{day}:{chat}{suffix}"
+                    since = day_start(now.date(), self.settings.timezone)
                     text, count = await self.reports.daily(now.date(), cutoff, since, ids)
                     frozen = await self.db.rows(
                         "SELECT key FROM report_delivery WHERE key=?", (daily_key,)
                     )
-                    if count or self.settings.send_empty_daily or frozen:
+                    if count or frozen:
                         documents = (
                             await self.reports.grade_documents(
                                 "daily", now.date(), cutoff, ids, since=since
@@ -156,37 +160,26 @@ class Scheduler:
                     else:
                         await self.db.prepare_delivery(daily_key, [], cutoff)
                         await self.db.delivery_progress(daily_key, 0, True, cutoff)
-                    # The delivery's frozen cutoff may predate a restart/retry.
-                    saved = (
-                        await self.db.rows(
-                            "SELECT created_at FROM report_delivery WHERE key=?", (daily_key,)
-                        )
-                    )[0]
-                    await self.db.set_state(
-                        f"daily_cutoff:{chat}{suffix}", saved["created_at"], cutoff
+                else:
+                    key = f"{kind}:{day}:{chat}{suffix}"
+                    service = (
+                        WeeklyReportService(self.reports)
+                        if kind == "weekly"
+                        else MonthlyReportService(self.reports)
                     )
-                if now.weekday() == 4:
-                    weekly_key = f"weekly:{day}:{chat}{suffix}"
-                    weekly = await WeeklyReportService(self.reports).render(
-                        now.date(), cutoff, ids, capture=False
-                    )
-                    monthly = await MonthlyReportService(self.reports).render(
-                        now.date(), cutoff, ids
-                    )
+                    if isinstance(service, WeeklyReportService):
+                        text = await service.render(now.date(), cutoff, ids, capture=False)
+                    else:
+                        text = await service.render(now.date(), cutoff, ids)
                     documents = None
                     if getattr(self.settings, "report_format", "text") == "image":
                         documents = await self.reports.grade_documents(
-                            "weekly", now.date(), cutoff, ids
+                            kind, now.date(), cutoff, ids
                         )
-                        documents += await self.reports.grade_documents(
-                            "monthly", now.date(), cutoff, ids
-                        )
-                    await self.send(
-                        weekly_key, chat, weekly + "\n\n" + monthly, cutoff, ids, documents
-                    )
+                    await self.send(key, chat, text, cutoff, ids, documents)
                     saved = (
                         await self.db.rows(
-                            "SELECT created_at FROM report_delivery WHERE key=?", (weekly_key,)
+                            "SELECT created_at FROM report_delivery WHERE key=?", (key,)
                         )
                     )[0]
                     await self.reports.capture_weekly(now.date(), saved["created_at"], ids)

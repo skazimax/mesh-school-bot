@@ -25,7 +25,6 @@ class Settings:
     worker_only: bool
     telegram_token: SecretStr
     allowed_chats: frozenset[int]
-    send_empty_daily: bool = False
     profile_id: str | None = None
     timeout: float = 20
     proxy: str | None = None
@@ -84,7 +83,6 @@ class Settings:
             worker_only=worker,
             telegram_token=token,
             allowed_chats=chats,
-            send_empty_daily=(os.getenv("SEND_EMPTY_DAILY_REPORT") or "false").lower() == "true",
             profile_id=os.getenv("MESH_PROFILE_ID") or None,
             timeout=timeout,
             proxy=os.getenv("MESH_PROXY") or None,
