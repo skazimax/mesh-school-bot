@@ -46,6 +46,13 @@ def change_text(change: AverageChange) -> str:
     )
 
 
+def same_period(current: dict[str, Any]) -> tuple[str, str]:
+    """MESH may move a period's end date; the same start keeps averages comparable."""
+    if current["period_start"]:
+        return "period_id LIKE ?", current["period_start"] + ":%"
+    return "period_id=?", current["period_id"]
+
+
 def day_start(day: date, timezone: ZoneInfo) -> str:
     return datetime.combine(day, time.min, timezone).isoformat()
 
@@ -200,10 +207,11 @@ class ReportService:
         if not rows or rows[0]["period_id"] == "unknown":
             return average_change(None, None)
         current = rows[0]
+        period, value = same_period(current)
         previous = await self.db.rows(
             "SELECT average FROM subject_snapshots WHERE student_id=? AND subject_id=? "
-            "AND period_id=? AND snapshot_at<=? ORDER BY snapshot_at DESC LIMIT 1",
-            (student_id, subject_id, current["period_id"], since),
+            f"AND {period} AND snapshot_at<=? ORDER BY snapshot_at DESC LIMIT 1",
+            (student_id, subject_id, value, since),
         )
         return average_change(
             Decimal(previous[0]["average"])
@@ -221,14 +229,15 @@ class ReportService:
             and current["period_start"] > today.isoformat()
         ):
             return average_change(None, None)
+        period, value = same_period(current)
         previous = await self.db.rows(
             "SELECT average FROM weekly_averages WHERE student_id=? AND subject_id=? "
-            "AND week_start=? AND period_id=?",
+            f"AND week_start=? AND {period}",
             (
                 current["student_id"],
                 current["subject_id"],
                 (week_start(today) - timedelta(days=7)).isoformat(),
-                current["period_id"],
+                value,
             ),
         )
         return average_change(

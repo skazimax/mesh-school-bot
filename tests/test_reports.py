@@ -340,6 +340,41 @@ async def test_weekly_dynamics_do_not_cross_trimester_or_skip_missing_week(data)
     assert (await reports.weekly_change(current, date(2026, 10, 2))).delta is None
 
 
+async def test_weekly_dynamics_survive_moved_period_end(data) -> None:  # type: ignore[no-untyped-def]
+    db, reports, student = data
+
+    def average(value: str, end: date) -> SubjectAverage:
+        return SubjectAverage(
+            student_id="1",
+            subject_id="5",
+            subject_name="Физика",
+            average=Decimal(value),
+            period_id=f"2026-09-01:{end}",
+            period_start=date(2026, 9, 1),
+            period_end=end,
+        )
+
+    await db.save_marks(
+        student, [], [average("4.00", date(2026, 10, 24))], "2026-10-02T18:00:00+03:00", False
+    )
+    await reports.capture_weekly(date(2026, 10, 2), "2026-10-02T19:00:00+03:00")
+    await db.save_marks(
+        student, [], [average("4.25", date(2026, 12, 31))], "2026-10-09T18:00:00+03:00", False
+    )
+    current = {
+        row["subject_id"]: row
+        for row in await reports.current_averages("1", "2026-10-09T19:00:00+03:00")
+    }["5"]
+    assert (await reports.weekly_change(current, date(2026, 10, 9))).delta == Decimal("0.25")
+    change = await reports.get_average_change(
+        "1", "5", "2026-10-03T00:00:00+03:00", "2026-10-09T19:00:00+03:00"
+    )
+    assert change.delta == Decimal("0.25")
+    current["period_start"] = "2026-10-01"
+    current["period_id"] = "2026-10-01:2026-12-31"
+    assert (await reports.weekly_change(current, date(2026, 10, 9))).delta is None
+
+
 def test_html_tables_escape_provider_content_and_keep_each_chunk_valid() -> None:
     text = "<b>текст & задание</b>" * 500 + "📚" * 2000
     parts = telegram_parts(text)

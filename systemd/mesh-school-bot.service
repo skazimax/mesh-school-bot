@@ -23,7 +23,7 @@ PrivateTmp=true
 ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/mesh-school-bot/data /opt/mesh-school-bot/.secrets
-MemoryMax=256M
+MemoryMax=384M
 
 [Install]
 WantedBy=multi-user.target

@@ -52,6 +52,20 @@ CREATE TABLE IF NOT EXISTS weekly_averages (
 );
 """
 
+SNAPSHOT_VALUES = ("subject_name", "average", "period_id", "period_start", "period_end")
+
+# Readers take the latest snapshot at or before a moment, so repeats add nothing.
+COMPACT_SNAPSHOTS = f"""
+DELETE FROM subject_snapshots WHERE id IN (
+ SELECT id FROM (
+  SELECT id, ROW_NUMBER() OVER w AS position,
+   {", ".join(f"{column} IS LAG({column}) OVER w AS same_{column}" for column in SNAPSHOT_VALUES)}
+  FROM subject_snapshots
+  WINDOW w AS (PARTITION BY student_id, subject_id ORDER BY snapshot_at)
+ ) WHERE position > 1 AND {" AND ".join(f"same_{column}" for column in SNAPSHOT_VALUES)}
+)
+"""
+
 
 class Database:
     def __init__(self, path: Path) -> None:
@@ -78,7 +92,11 @@ class Database:
             raise RuntimeError("unsupported database schema version")
         await self.db.executescript(SCHEMA)
         await self.db.execute("PRAGMA user_version=2")
+        async with self.db.execute(COMPACT_SNAPSHOTS) as cursor:
+            compacted = cursor.rowcount
         await self.db.commit()
+        if compacted > 0:
+            await self.db.execute("VACUUM")
 
     async def close(self) -> None:
         if self.connection:
@@ -176,22 +194,32 @@ class Database:
                         "WHERE student_id=? AND mesh_mark_id=?",
                         (*values[2:11], now, student.id, mark.id),
                     )
+                async with self.db.execute(
+                    "SELECT s.* FROM subject_snapshots s WHERE student_id=? AND snapshot_at="
+                    "(SELECT MAX(t.snapshot_at) FROM subject_snapshots t "
+                    "WHERE t.student_id=s.student_id AND t.subject_id=s.subject_id)",
+                    (student.id,),
+                ) as cursor:
+                    latest = {
+                        row["subject_id"]: tuple(row[column] for column in SNAPSHOT_VALUES)
+                        for row in await cursor.fetchall()
+                    }
                 for average in averages:
+                    snapshot = (
+                        average.subject_name,
+                        str(average.average) if average.average is not None else None,
+                        average.period_id,
+                        average.period_start.isoformat() if average.period_start else None,
+                        average.period_end.isoformat() if average.period_end else None,
+                    )
+                    if latest.get(average.subject_id) == snapshot:
+                        continue
                     await self.db.execute(
-                        "INSERT INTO subject_snapshots(student_id,subject_id,subject_name,"
-                        "snapshot_at,average,period_id,period_start,period_end) "
-                        "VALUES(?,?,?,?,?,?,?,?) "
+                        "INSERT INTO subject_snapshots(student_id,subject_id,snapshot_at,"
+                        + ",".join(SNAPSHOT_VALUES)
+                        + ") VALUES(?,?,?,?,?,?,?,?) "
                         "ON CONFLICT(student_id,subject_id,snapshot_at) DO NOTHING",
-                        (
-                            student.id,
-                            average.subject_id,
-                            average.subject_name,
-                            now,
-                            str(average.average) if average.average is not None else None,
-                            average.period_id,
-                            average.period_start.isoformat() if average.period_start else None,
-                            average.period_end.isoformat() if average.period_end else None,
-                        ),
+                        (student.id, average.subject_id, now, *snapshot),
                     )
                 await self._state(f"bootstrap:{student.id}", "done", now)
                 await self._state(f"marks:{student.id}", now, now)

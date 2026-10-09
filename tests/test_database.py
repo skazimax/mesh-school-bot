@@ -62,6 +62,40 @@ async def test_initial_bootstrap_does_not_notify(db: Database) -> None:
     assert len(await db.rows("SELECT * FROM subject_snapshots")) == 1
 
 
+async def test_snapshots_store_only_changes_and_compact_on_open(db: Database) -> None:
+    student = (await db.students())[0]
+    average = SubjectAverage(
+        student_id="1",
+        subject_id="3",
+        subject_name="Математика",
+        period_id="term",
+        average=Decimal("4.42"),
+    )
+    await db.save_marks(student, [], [average], "2026-09-18T12:00:00+03:00", False)
+    await db.save_marks(student, [], [average], "2026-09-18T12:30:00+03:00", False)
+    average.average = Decimal("4.50")
+    await db.save_marks(student, [], [average], "2026-09-18T13:00:00+03:00", False)
+    query = "SELECT snapshot_at, average FROM subject_snapshots ORDER BY snapshot_at"
+    assert [row["average"] for row in await db.rows(query)] == ["4.42", "4.50"]
+
+    # Databases written by earlier versions held a snapshot for every sync.
+    async with db.lock:
+        for at, value in (("12:10", "4.42"), ("13:10", "4.50"), ("13:20", "4.42")):
+            await db.db.execute(
+                "INSERT INTO subject_snapshots(student_id,subject_id,subject_name,snapshot_at,"
+                "average,period_id) VALUES('1','3','Математика',?,?,'term')",
+                (f"2026-09-18T{at}:00+03:00", value),
+            )
+        await db.db.commit()
+    await db.close()
+    await db.open()
+    assert [(row["snapshot_at"][11:16], row["average"]) for row in await db.rows(query)] == [
+        ("12:00", "4.42"),
+        ("13:00", "4.50"),
+        ("13:20", "4.42"),
+    ]
+
+
 async def test_backup_restores_after_reopen(db: Database, tmp_path: Path) -> None:
     backup_path = tmp_path / "backup.db"
     await db.backup(backup_path)

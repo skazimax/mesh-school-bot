@@ -40,8 +40,16 @@ sudo systemctl status mesh-school-bot.service --no-pager
 
 Пользователь `meshbot` должен иметь доступ на чтение к коду и `.venv`, запись —
 к `data/` и `.secrets/`. Сервис использует hardening systemd и сам обрабатывает SIGTERM.
-Если ваш прокси запускается отдельным сервисом, при необходимости добавьте
-его в After/Wants unit-файла. Конкретный прокси-сервис не является зависимостью проекта.
+Если ваш прокси запускается отдельным сервисом, добавьте его в After/Wants через
+drop-in, чтобы переустановка шаблона unit-файла не стирала локальную зависимость.
+Конкретный прокси-сервис не является зависимостью проекта:
+
+```bash
+sudo systemctl edit mesh-school-bot.service
+# [Unit]
+# Wants=my-proxy.service
+# After=my-proxy.service
+```
 
 ## Проверка и обновление
 
