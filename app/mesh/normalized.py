@@ -62,7 +62,8 @@ class MobileMeshClient:
             state = self.store.load()
             from time import time
 
-            if state.mesh_expires_at is not None and state.mesh_expires_at <= time() + 300:
+            # An hour ahead leaves syncs to retry while MESH has short outages.
+            if state.mesh_expires_at is not None and state.mesh_expires_at <= time() + 3600:
                 await self._refresh(self.generation)
 
     async def get_profile(self) -> list[Student]:

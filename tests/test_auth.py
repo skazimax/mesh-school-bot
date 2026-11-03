@@ -294,3 +294,195 @@ async def test_untrusted_redirect_is_not_followed(store: AuthStore) -> None:
         )
         with pytest.raises(MeshAuthError, match="Неизвестный redirect"):
             await ResearchAuth(Transport(http), store)._authorization_code(response, lambda: "123")
+
+
+TRUST_FORM = """<form method="post" action="/sps/login/ur/trust">
+<input type="hidden" name="csrf" value="c-1"><button name="answer" value="yes">Доверять</button>
+<button name="answer" value="no">Не доверять</button></form>"""
+# As on login.mos.ru: a script fills the hidden action field from the pressed button.
+TRUST_SCRIPT_FORM = """<form method="post" action="/sps/login/ur/askToTrust">
+<input type="hidden" name="action" value="">
+<button id="agree" data-loading-text="Выполнение операции ...">Доверять</button>
+<button id="disagree" data-loading-text="Выполнение операции ...">Не доверять</button></form>"""
+
+
+def web_handler(  # type: ignore[no-untyped-def]
+    calls: list[str],
+    *,
+    session: str = "s2",
+    token: str = "web-mesh",
+    trust_page: str = "",
+    accept: frozenset[str] = frozenset({"agree"}),
+):
+    """login.mos.ru issues the session; school.mos.ru redeems the code into aupd_token."""
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request.url.host + request.url.path)
+        if request.url.path == "/sps/oauth/ae":
+            assert request.url.params["client_id"] == "dnevnik.mos.ru"
+            cookie = {"set-cookie": f"session-cookie={session}; Domain=login.mos.ru; Path=/"}
+            if request.url.params.get("display") == "script":
+                return httpx.Response(
+                    200, headers=cookie, json={"items": [{"inquire": "login_with_password"}]}
+                )
+            if "session-cookie=s1" not in request.headers.get("cookie", ""):
+                return httpx.Response(303, headers={"location": "/sps/login/methods/password"})
+            return httpx.Response(
+                303,
+                headers={
+                    **cookie,
+                    "location": "https://school.mos.ru/v3/auth/sudir/callback?code=renewed",
+                },
+            )
+        if request.url.path.endswith("/password"):
+            assert json.loads(request.content)["password"] == "test-password"
+            return httpx.Response(200, json={"items": [{"inquire": "ask_to_send_sms"}]})
+        if request.url.path.endswith("/sms/bind"):
+            if not request.content:
+                return httpx.Response(200, json={"inquire": "enter_sms_code"})
+            return httpx.Response(302, headers={"location": "/sps/login/ur/askToTrust"})
+        if request.url.path == "/sps/login/ur/askToTrust" and request.method == "POST":
+            answer = parse_qs(request.content.decode()).get("action", [""])[0]
+            if answer not in accept:
+                return httpx.Response(404)
+            calls.append("trusted" if answer == "agree" else "declined")
+            return httpx.Response(
+                302, headers={"location": "/sps/oauth/ae?client_id=dnevnik.mos.ru"}
+            )
+        if request.url.path == "/sps/login/ur/askToTrust":
+            return httpx.Response(200, html=trust_page)
+        if request.url.path == "/sps/login/ur/trust":
+            calls.append("trusted")
+            assert parse_qs(request.content.decode()) == {"csrf": ["c-1"], "answer": ["yes"]}
+            return httpx.Response(
+                302, headers={"location": "/sps/oauth/ae?client_id=dnevnik.mos.ru"}
+            )
+        if request.url.path == "/v3/auth/sudir/callback":
+            return httpx.Response(
+                302,
+                headers={
+                    "set-cookie": f"aupd_token={token}; Domain=school.mos.ru; Path=/",
+                    "location": "/",
+                },
+            )
+        assert request.headers["auth-token"] == token
+        return httpx.Response(200, json=[{"id": 111, "type": "parent"}])
+
+    return handler
+
+
+@pytest.mark.parametrize(
+    "trust_page,accept,outcome",
+    [
+        (TRUST_FORM, frozenset(), "trusted"),
+        (TRUST_SCRIPT_FORM, frozenset({"agree"}), "trusted"),
+        (TRUST_SCRIPT_FORM, frozenset({"disagree"}), "declined"),
+        ("<div id=root></div>", frozenset(), None),
+    ],
+)
+async def test_web_login_keeps_session_not_password(
+    store: AuthStore, trust_page: str, accept: frozenset[str], outcome: str | None
+) -> None:
+    calls: list[str] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path == "/sps/oauth/ae" and "display" not in request.url.params:
+            # After the SMS step mos.ru resumes OAuth with the session it just set.
+            assert "session-cookie=s2" in request.headers.get("cookie", "")
+            return httpx.Response(
+                302, headers={"location": "https://school.mos.ru/v3/auth/sudir/callback?code=c1"}
+            )
+        return web_handler(calls, trust_page=trust_page, accept=accept)(request)
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    ) as http:
+        state = await ResearchAuth(Transport(http), store).web_login(
+            "test-login", "test-password", lambda: "123456"
+        )
+        assert not http.cookies.jar, "a shared HTTP client must not keep the session"
+    saved = store.load()
+    assert saved.mesh_access_token.get_secret_value() == "web-mesh"  # type: ignore[union-attr]
+    assert state.refresh_via == "web_login" and saved.activated
+    assert saved.client_id is None and saved.refresh_token is None
+    session = json.loads(saved.sso_cookies.get_secret_value())  # type: ignore[union-attr]
+    assert [(c["name"], c["value"]) for c in session] == [("session-cookie", "s2")]
+    text = store.path.read_text()
+    assert "test-password" not in text and "123456" not in text
+    assert "school.mos.ru/v3/auth/sudir/callback" in calls
+    # Trust is accepted when offered; without a form login still completes.
+    assert [call for call in calls if call in {"trusted", "declined"}] == (
+        [outcome] if outcome else []
+    )
+
+
+async def test_rejected_trust_answers_stop_with_details(store: AuthStore) -> None:
+    handler = web_handler([], trust_page=TRUST_SCRIPT_FORM, accept=frozenset())
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    ) as http:
+        with pytest.raises(MeshAuthError, match="agree.*404.*disagree.*404"):
+            await ResearchAuth(Transport(http), store).web_login("u", "test-password", lambda: "1")
+    assert store.load().mesh_access_token.get_secret_value() == "old-mesh"  # type: ignore[union-attr]
+
+
+def web_store(store: AuthStore) -> AuthStore:
+    store.save(
+        AuthState(
+            sso_cookies=SecretStr(
+                json.dumps(
+                    [
+                        {
+                            "name": "session-cookie",
+                            "value": "s1",
+                            "domain": "login.mos.ru",
+                            "path": "/",
+                        }
+                    ]
+                )
+            ),
+            mesh_access_token=SecretStr("old-web-mesh"),
+            activated=True,
+        )
+    )
+    return store
+
+
+async def test_web_session_renews_token_and_rotates_cookies(store: AuthStore) -> None:
+    calls: list[str] = []
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(web_handler(calls, token="fresh")), follow_redirects=False
+    ) as http:
+        state = await ResearchAuth(Transport(http), web_store(store)).refresh()
+    assert state.refresh_via == "sso_session"
+    saved = store.load()
+    assert saved.mesh_access_token.get_secret_value() == "fresh"  # type: ignore[union-attr]
+    assert '"s2"' in saved.sso_cookies.get_secret_value()  # type: ignore[union-attr]
+    assert calls == [
+        "login.mos.ru/sps/oauth/ae",
+        "school.mos.ru/v3/auth/sudir/callback",
+        "dnevnik.mos.ru/acl/api/users/profile_info",
+    ]
+
+
+async def test_expired_web_session_asks_for_login_and_keeps_token(store: AuthStore) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(303, headers={"location": "/sps/login/methods/password?bo=x"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    ) as http:
+        with pytest.raises(MeshAuthError, match="web-login"):
+            await ResearchAuth(Transport(http), web_store(store)).refresh()
+    assert store.load().mesh_access_token.get_secret_value() == "old-web-mesh"  # type: ignore[union-attr]
+
+
+async def test_web_session_never_follows_foreign_redirect(store: AuthStore) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(302, headers={"location": "https://evil.example/cb?code=stolen"})
+
+    async with httpx.AsyncClient(
+        transport=httpx.MockTransport(handler), follow_redirects=False
+    ) as http:
+        with pytest.raises(MeshAuthError, match="Неизвестный redirect"):
+            await ResearchAuth(Transport(http), web_store(store)).refresh()

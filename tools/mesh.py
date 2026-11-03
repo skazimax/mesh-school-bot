@@ -38,6 +38,7 @@ def parser() -> argparse.ArgumentParser:
         choices=[
             "prepare-login",
             "login",
+            "web-login",
             "refresh",
             "profile",
             "marks",
@@ -130,9 +131,11 @@ async def run(args: argparse.Namespace) -> int:
         if args.command == "prepare-login":
             await prepare_login(transport, args.registration_file)
             return 0
-        if args.command in {"login", "refresh"}:
-            if args.command == "login":
-                metadata = load_registration(args.registration_file)
+        if args.command in {"login", "web-login", "refresh"}:
+            if args.command in {"login", "web-login"}:
+                metadata = (
+                    load_registration(args.registration_file) if args.command == "login" else None
+                )
                 if not sys.stdin.isatty():
                     raise MeshConfigError("login требует интерактивный терминал для пароля и SMS.")
                 username = (
@@ -144,8 +147,11 @@ async def run(args: argparse.Namespace) -> int:
                 password = await asyncio.to_thread(
                     getpass.getpass, "Пароль mos.ru (не сохраняется): "
                 )
-                state = await auth.login(
-                    metadata, username, password, lambda: getpass.getpass("SMS-код: ")
+                ask_otp = lambda: getpass.getpass("SMS-код: ")  # noqa: E731
+                state = (
+                    await auth.login(metadata, username, password, ask_otp)
+                    if metadata
+                    else await auth.web_login(username, password, ask_otp)
                 )
             else:
                 state = await auth.refresh(grant=args.grant)

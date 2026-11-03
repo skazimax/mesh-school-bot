@@ -9,8 +9,10 @@ from pydantic import BaseModel, ConfigDict, Field, SecretStr
 class AuthState(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    client_id: SecretStr
-    client_secret: SecretStr
+    # Mobile login: a registered device. Web login: a mos.ru session instead.
+    client_id: SecretStr | None = None
+    client_secret: SecretStr | None = None
+    sso_cookies: SecretStr | None = None
     refresh_token: SecretStr | None = None
     mesh_access_token: SecretStr | None = None
     mos_expires_in: int | None = None

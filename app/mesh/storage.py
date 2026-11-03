@@ -44,7 +44,13 @@ class AuthStore:
 
     def save(self, state: AuthState) -> None:
         data = state.model_dump(mode="json")
-        for key in ("client_id", "client_secret", "refresh_token", "mesh_access_token"):
+        for key in (
+            "client_id",
+            "client_secret",
+            "sso_cookies",
+            "refresh_token",
+            "mesh_access_token",
+        ):
             secret = getattr(state, key)
             data[key] = secret.get_secret_value() if secret else None
         save_private_json(self.path, data)
